@@ -122,3 +122,22 @@ def test_no_mapping_does_not_create_33rd_list(repo):
     assert plan["changes"] == []
     assert plan["create_lists"] == []
     assert len(plan["skipped_categories"]) == 1
+
+
+def test_unclassified_uses_existing_list_and_preserves_memberships(repo):
+    state = {"lists": {"unclassified": "L_u", "Manual": "L_m"},
+             "memberships": {repo.id: ["L_m"]}}
+    result = {repo.id: ClassificationResult(repo_id=repo.id, categories=[], review_required=True)}
+    plan = create_plan([repo], result, state, "hash", "account",
+                       create_missing_lists=False, unclassified_list="unclassified")
+    assert plan["create_lists"] == []
+    assert plan["changes"][0]["add_names"] == ["unclassified"]
+    assert plan["changes"][0]["desired_names"] == ["Manual", "unclassified"]
+
+
+def test_excluded_repository_not_sent_to_fallback(repo):
+    state = {"lists": {"unclassified": "L_u"}, "memberships": {}}
+    result = {repo.id: ClassificationResult(repo_id=repo.id, excluded=True, categories=[])}
+    plan = create_plan([repo], result, state, "hash", "account",
+                       create_missing_lists=False, unclassified_list="unclassified")
+    assert plan["changes"] == []

@@ -26,7 +26,8 @@ def digest(value: Any) -> str:
 def create_plan(repos: list[Repository], results: dict[str, ClassificationResult], snapshot: dict,
                 rule_hash: str, account: str, *,
                 category_to_list: dict[str, str] | None = None,
-                create_missing_lists: bool = True) -> dict:
+                create_missing_lists: bool = True,
+                unclassified_list: str | None = None) -> dict:
     """No GitHub write; current list memberships included in every intended assignment."""
     existing = snapshot["lists"]
     current = snapshot["memberships"]
@@ -44,10 +45,14 @@ def create_plan(repos: list[Repository], results: dict[str, ClassificationResult
         return destination if create_missing_lists else None
     for repo in sorted(repos, key=lambda r: r.full_name.casefold()):
         classification = results[repo.id]
-        if classification.excluded or not classification.categories:
+        if classification.excluded:
+            continue
+        # Route genuinely unclassified repositories to the configured existing list.
+        labels = classification.categories or ([unclassified_list] if unclassified_list else [])
+        if not labels:
             continue
         target_names = []
-        for category in classification.categories:
+        for category in labels:
             destination = resolve_category(category)
             if destination is None:
                 skipped.append({"repo_id": repo.id, "repository": repo.full_name,

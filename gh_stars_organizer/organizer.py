@@ -106,7 +106,8 @@ class StarsOrganizer:
             raise GitHubCLIError("authenticated GitHub user does not match configured username")
         plan = create_plan(repo_list, self.classify(), remote, self.classifier.fingerprint(), account,
                            category_to_list=self.config.organization.category_to_list,
-                           create_missing_lists=self.config.organization.create_missing_lists)
+                           create_missing_lists=self.config.organization.create_missing_lists,
+                           unclassified_list=self.config.organization.unclassified_list)
         # GitHub currently caps Star Lists at 32. Fail before creating any list.
         if len(remote["lists"]) + len(plan["create_lists"]) > 32:
             raise ValueError("planned list creation exceeds GitHub's 32-list account limit")

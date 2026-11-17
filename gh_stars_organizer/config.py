@@ -66,6 +66,7 @@ class OrganizationSettings(StrictModel):
     preserve_existing_memberships: bool = True
     create_missing_lists: bool = False
     category_to_list: dict[str, str] = Field(default_factory=dict)
+    unclassified_list: str | None = None
     remove_obsolete_memberships: bool = False  # reserved; deletion not implemented
     skip_unchanged: bool = True
     require_confirmation: bool = True
