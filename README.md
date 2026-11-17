@@ -1,135 +1,78 @@
-# gh-stars-organizer
+# gh-stars-organizer — deterministic edition
 
-`gh-stars-organizer` helps you turn a chaotic GitHub stars list into a searchable, structured knowledge base.
+Local-first, multi-label organization of GitHub starred repositories. **No OpenAI account, LLMs, embedding APIs, local models, FAISS, browser cookies or manually created PAT required.** Authentication uses [GitHub CLI](https://cli.github.com/) (`gh`).
 
-It fetches your starred repositories, classifies them with an LLM, builds embedding-based similarity search, and organizes results into GitHub Lists (with a local fallback when list APIs or scopes are unavailable).
+> Implementation snapshot based on inspection of the MIT-licensed upstream project [vins13pattar/gh-stars-organizer](https://github.com/vins13pattar/gh-stars-organizer). **This downloadable implementation is not an upstream release or an upstream commit.** GitHub list-write support has been tested against mocked GraphQL replies, **not** a real authorized account. Exercise `--apply` only after examining the plan and backup.
 
-Project site: `https://vins13pattar.github.io/gh-stars-organizer/`
+## What it does
 
-## Why this exists
+- Retrieve the authenticated account's stars through paginated GitHub GraphQL; preserve inaccessible/legacy data until a complete sync succeeds.
+- Classify them offline using field-weighted exact keywords and phrases, multi-label scoring, negative rules, synonyms, category profiles, overrides and transparent evidence.
+- Keep metadata in SQLite, migrate old cache tables non-destructively and search offline using SQLite FTS5/BM25 (LIKE fallback when FTS5 is unavailable).
+- Preview a **read-only** plan, fetch *all* list memberships, reconcile additively, save a pre-write snapshot, reject stale plans, checkpoint partial failures and verify a remote readback.
+- Export Markdown/JSON/CSV reports, including recorded application counts and most recent plan summaries, and local Markdown category lists.
+- Provide a lightweight interactive terminal menu usable over SSH.
 
-Developers star hundreds of repositories and later struggle to find what matters.  
-This tool makes starred repos discoverable again.
+## Important safety constraints
 
-## Key capabilities
+`organize` and `organize --dry-run` never mutate remote account data. Only `organize --apply` can create a list or change memberships. `updateUserListsForItem` **replaces** all memberships; the implementation always supplies the complete union of existing and new memberships, and re-reads remote state before each repository update. Never unstars, deletes a list, or removes existing memberships. If the API is unsupported, `organize` provides an explicitly labeled local Markdown fallback. If a run fails after starting, GitHub is **not atomic**; the checkpoint documents what was applied and requires inspection before retrying.
 
-- Fetch all stars (with pagination for large accounts)
-- LLM-based repository classification into practical engineering categories
-- Embedding-based semantic search and similarity grouping
-- Automatic organization into GitHub User Lists
-- Local cache (SQLite + FAISS) to avoid repeated expensive work
-- Insights report (`stars-insights.md`) with trends and cleanup recommendations
-- Interactive terminal UI (`tui`) for one-click workflows
+## Requirements and installation
 
-## Architecture
-
-```mermaid
-flowchart TD
-    A["GitHub GraphQL API"] --> B["Fetch Stars"]
-    B --> C["LLM Classification"]
-    C --> D["Embeddings Generation"]
-    D --> E["Local SQLite Cache"]
-    E --> F["Create/Reuse GitHub Lists"]
-    F --> G["Assign Repositories"]
-    E --> H["Insights Report"]
-```
-
-## Installation
-
-### Requirements
-
-- Python 3.11+
-- [GitHub CLI](https://cli.github.com/) authenticated
-- OpenAI-compatible API key (`OPENAI_API_KEY`) for remote classification/embeddings (optional; local fallbacks exist)
-
-### Install from source
+Python 3.11+, GitHub CLI, and an ordinary terminal. To install this downloadable replacement project:
 
 ```bash
-git clone https://github.com/vins13pattar/gh-stars-organizer.git
-cd gh-stars-organizer
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv python pin 3.12
+uv sync --extra dev
+gh auth login
+gh auth status
+gh-stars-organizer --help
 ```
 
-## Quickstart
+If using `uv`, run `uv sync` (when a lockfile is generated on your machine) or `uv run gh-stars-organizer --help`. When GitHub user-list reads fail due to permissions, run `gh auth refresh -s user` locally and check `gh auth status`. No credentials should be pasted into chats or configuration.
+
+## Quickstart: first sync through verified planning
 
 ```bash
-gh-stars-organizer config --init
-gh-stars-organizer sync
-gh-stars-organizer preview
-gh-stars-organizer organize
+gh-stars-organizer doctor                     # read-only connectivity/permission diagnosis
+gh-stars-organizer config --init              # writes local YAML, never remote
+gh-stars-organizer config --validate
+gh-stars-organizer sync                        # fetches all stars into SQLite
+gh-stars-organizer classify                    # offline rule scoring
+gh-stars-organizer preview --all               # inspect multi-label suggestions
+gh-stars-organizer preview --unclassified
+gh-stars-organizer organize --dry-run --output plan.json
+gh-stars-organizer backup --output backup.json # remote snapshot, no changes
+# Carefully inspect the saved plan before the next command:
+gh-stars-organizer organize --apply --plan plan.json
+gh-stars-organizer verify --checkpoint .gh-stars-organizer-plans/<PLAN_ID>.checkpoint.json
 gh-stars-organizer insights
+gh-stars-organizer search "differential equations" --language Python
+gh-stars-organizer report --format csv --output stars.csv
 ```
 
-## Commands
+`--apply` requires terminal confirmation by default. The explicit `--yes` flag bypasses the interactive prompt, but does **not** bypass stale-plan checks. The plan is tied to an authenticated account, a full remote snapshot and a classification-rule fingerprint.
 
-- `gh-stars-organizer sync` — fetch and cache stars
-- `gh-stars-organizer preview` — show predicted category per repo
-- `gh-stars-organizer organize` — assign repositories into GitHub Lists
-- `gh-stars-organizer insights` — generate `stars-insights.md`
-- `gh-stars-organizer search "<query>"` — semantic repo search
-- `gh-stars-organizer tui` — interactive TUI
-- `gh-stars-organizer config` — initialize/show configuration
+## User-oriented workflows
 
-## TUI
+`config --show`, `config --validate`, `config --migrate` (write a separately named copy of old AI configuration), `sync --refresh`, `sync --no-readme`, `classify --profile scientific`, `classify --explain owner/repo`, `preview --category "Developer Tools"`, `search "workflow" --category "Developer Tools"`, `search "graph" --topic graph`, `report --format json`, `cache status`, `cache clear`, and `tui`.
 
-Launch:
+Profiles are `general`, `data`, `scientific`, `minimal`, and `custom`. `general` is the default. Custom rules can be appended in YAML, and `custom` disables all built-in categories. Manual overrides always win. Repositories without sufficient evidence stay **Unclassified - Review**, not assigned to arbitrary categories.
+
+Configuration: [`examples/config.yaml`](examples/config.yaml). Documentation: [`docs/index.md`](docs/index.md), [`docs/safety.md`](docs/safety.md), [`docs/architecture.md`](docs/architecture.md), [`docs/cli.md`](docs/cli.md), [`docs/testing.md`](docs/testing.md).
+
+## Development and audit status
 
 ```bash
-gh-stars-organizer tui
+python -m pytest -q
+python -m pytest --cov=gh_stars_organizer --cov-report=term-missing
+python -m compileall -q gh_stars_organizer
 ```
 
-TUI includes:
+Tests are entirely offline and mocked. The release source carries no provider API client dependencies. A live-authorized GitHub GraphQL smoke test and publishing verification are **not claimed**.
 
-- Sync / Preview / Organize / Insights actions
-- Semantic search
-- Live status and progress messages
+## Limitations
 
-## Configuration
+A local YAML category schema is not a language model: rule coverage varies and must be tuned to the user's collection. README retrieval is opt-in. Unavailable README content preserves any older cached copy; it does not cause remote writes. GitHub Star List requests may require a `user` scope, and actual provider behavior can change. Full remote snapshot reads before each write prioritize safety over speed. No automated rollback, deletion of obsolete memberships, or unstar features are included. The old FAISS and model tables remain in existing SQLite databases for non-destructive migration; they are not consulted.
 
-Default config file: `~/.gh-stars-organizer/config.yaml`  
-Example template: `examples/config.yaml`
-
-Common options:
-
-- LLM model
-- Embedding model
-- Categories
-- Cache/index/report paths
-- Rate limits
-
-## GitHub List behavior
-
-Organization uses GitHub User Lists GraphQL APIs (`lists`, `createUserList`, `updateUserListsForItem`).
-
-- For GitHub list updates, your `gh` auth token needs `user` scope:
-  - `gh auth refresh -s user`
-- If list APIs/scopes are unavailable, the tool generates local categorized lists at:
-  - `~/.gh-stars-organizer/lists`
-
-## Example output
-
-```text
-Fetching stars... page 3, repos 300
-Caching repositories locally...
-Classifying repositories... 120/742
-Organize done. Created 8 lists, processed 742 assignments.
-```
-
-## Development
-
-```bash
-pytest -q
-```
-
-CI and release workflows are included in `.github/workflows/`.
-GitHub Pages is deployed from `docs/` via `.github/workflows/pages.yml`.
-
-## Contributing
-
-See `CONTRIBUTING.md`.
-
-## License
-
-MIT
+License: MIT; upstream license attribution retained in `LICENSE`.

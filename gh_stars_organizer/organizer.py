@@ -1,354 +1,138 @@
+"""Composition layer with offline-first commands and conservative remote-change planning."""
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Callable
+import json
 import re
+from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
-from rich.console import Console
-
-from gh_stars_organizer.cache import SQLiteCache
-from gh_stars_organizer.classifier import RepositoryClassifier
-from gh_stars_organizer.config import AppConfig
-from gh_stars_organizer.embeddings import EmbeddingClient, FaissSimilarityIndex
-from gh_stars_organizer.github_client import GitHubCLIError, GitHubClient
-from gh_stars_organizer.insights import build_markdown_report
-from gh_stars_organizer.models import Repository, SearchResult
-
+from .cache import SQLiteCache
+from .classifier import RepositoryClassifier
+from .config import AppConfig
+from .github_client import GitHubClient, GitHubCLIError
+from .models import ClassificationResult, Repository, SearchResult
+from .organization import apply_plan, create_plan, digest
+from .reporting import write_report
 
 class StarsOrganizer:
-    def __init__(self, config: AppConfig, console: Console | None = None) -> None:
+    def __init__(self, config: AppConfig, github: GitHubClient | None = None):
         self.config = config
-        self.console = console or Console()
-        self.cache = SQLiteCache(config.cache_db_path)
-        self.github = GitHubClient(
-            page_size=config.github_page_size,
-            requests_per_minute=config.github_requests_per_minute,
-        )
-        self.classifier = RepositoryClassifier(
-            api_base_url=config.api_base_url,
-            model=config.model,
-            categories=config.categories,
-            api_key_env=config.api_key_env,
-            requests_per_minute=config.llm_requests_per_minute,
-        )
-        self.embedding_client = EmbeddingClient(
-            api_base_url=config.api_base_url,
-            model=config.embedding_model,
-            api_key_env=config.api_key_env,
-            requests_per_minute=config.llm_requests_per_minute,
-        )
-        self.index = FaissSimilarityIndex(config.faiss_index_path)
+        self.cache = SQLiteCache(config.cache.db_path)
+        self.github = github or GitHubClient(config.github.page_size)
+        self.classifier = RepositoryClassifier(config)
 
-    def sync(self, status_callback: Callable[[str], None] | None = None) -> list[Repository]:
-        def emit(message: str) -> None:
-            if status_callback:
-                status_callback(message)
-            self.console.print(f"[bold cyan]{message}[/bold cyan]")
-
-        emit("Fetching starred repositories...")
-        repositories = self.github.fetch_starred_repositories(
-            progress_callback=lambda page, total: emit(f"Fetching stars... page {page}, repos {total}")
-        )
-        emit("Caching repositories locally...")
-        self.cache.upsert_repositories(repositories)
-        self.cache.set_last_sync()
-        emit(f"Fetched {len(repositories)} repositories.")
-        return repositories
-
-    def _ensure_repositories(self) -> list[Repository]:
-        repositories = self.cache.list_repositories()
-        if repositories:
-            return repositories
-        return self.sync()
-
-    def classify_repositories(
-        self,
-        repositories: list[Repository],
-        status_callback: Callable[[str], None] | None = None,
-    ) -> dict[str, str]:
-        def emit(message: str) -> None:
-            if status_callback:
-                status_callback(message)
-
-        self.console.print("[bold cyan]Classifying repositories...[/bold cyan]")
-        classifications = self.cache.all_classifications(self.config.model)
-        missing = [repo for repo in repositories if repo.id not in classifications]
-        total_missing = len(missing)
-        processed = 0
-        if total_missing:
-            emit(f"Classifying repositories... 0/{total_missing}")
-        for repo in repositories:
-            if repo.id in classifications:
-                continue
-            category = self.classifier.classify(repo)
-            self.cache.set_classification(repo.id, self.config.model, category)
-            classifications[repo.id] = category
-            processed += 1
-            if processed % 10 == 0 or processed == total_missing:
-                emit(f"Classifying repositories... {processed}/{total_missing}")
-            self.console.print(f"[dim]{repo.full_name}[/dim] -> [yellow]{category}[/yellow]")
-        if not total_missing:
-            emit("Classification cache is up to date.")
-        return classifications
-
-    def embed_repositories(self, repositories: list[Repository]) -> dict[str, list[float]]:
-        self.console.print("[bold cyan]Generating embeddings...[/bold cyan]")
-        embeddings = self.cache.all_embeddings(self.config.embedding_model)
-        for repo in repositories:
-            if repo.id in embeddings:
-                continue
-            vector = self.embedding_client.embed_text(repo.embedding_text())
-            self.cache.set_embedding(repo.id, self.config.embedding_model, vector)
-            embeddings[repo.id] = vector
-        self.index.build(embeddings)
-        return embeddings
-
-    def preview(
-        self,
-        limit: int = 100,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> list[tuple[Repository, str]]:
-        repositories = self._ensure_repositories()
-        classifications = self.classify_repositories(repositories, status_callback=status_callback)
-        preview_rows: list[tuple[Repository, str]] = []
-        for repo in repositories[:limit]:
-            preview_rows.append((repo, classifications.get(repo.id, "other")))
-        return preview_rows
-
-    def _write_local_lists(self, grouped: dict[str, list[Repository]]) -> tuple[Path, int]:
-        output_dir = self.config.local_lists_path
-        output_dir.mkdir(parents=True, exist_ok=True)
-        index_lines = ["# Local Star Lists", ""]
-        created = 0
-        for category, repos in sorted(grouped.items()):
-            slug = re.sub(r"[^a-z0-9-]+", "-", category.lower()).strip("-") or "other"
-            path = output_dir / f"{slug}.md"
-            lines = [f"# {category}", "", f"Total repositories: {len(repos)}", ""]
-            for repo in sorted(repos, key=lambda item: item.full_name.lower()):
-                lines.append(f"- [{repo.full_name}]({repo.url})")
-            path.write_text("\n".join(lines) + "\n")
-            index_lines.append(f"- [{category}]({path.name}) ({len(repos)} repos)")
-            created += 1
-        (output_dir / "index.md").write_text("\n".join(index_lines) + "\n")
-        return output_dir, created
-
-    def organize(self, status_callback: Callable[[str], None] | None = None) -> dict[str, int | bool | str]:
-        repositories = self._ensure_repositories()
-        classifications = self.classify_repositories(repositories, status_callback=status_callback)
-        grouped: dict[str, list[Repository]] = defaultdict(list)
-        for repo in repositories:
-            grouped[classifications.get(repo.id, "other")].append(repo)
-
-        try:
-            existing_lists = self.github.get_starred_lists()
-        except GitHubCLIError as exc:
-            message = str(exc)
-            if ("Field 'lists' doesn't exist on type 'User'" in message) or (
-                "starredRepositoryLists" in message and "doesn't exist on type 'User'" in message
-            ):
-                output_dir, created = self._write_local_lists(grouped)
-                if status_callback:
-                    status_callback(
-                        "GitHub Star Lists API unavailable. Generated local categorized lists at "
-                        f"{output_dir}."
-                    )
-                return {
-                    "lists_created": 0,
-                    "repos_processed": len(repositories),
-                    "star_lists_supported": False,
-                    "local_lists_generated": True,
-                    "local_lists_created": created,
-                    "local_lists_path": str(output_dir),
-                    "message": f"GitHub Star Lists API unavailable. Local categorized lists generated at {output_dir}.",
-                }
-            if "INSUFFICIENT_SCOPES" in message or "requires one of the following scopes: ['user']" in message:
-                output_dir, created = self._write_local_lists(grouped)
-                if status_callback:
-                    status_callback(
-                        "GitHub list APIs need 'user' scope. Run: gh auth refresh -s user. "
-                        f"Generated local categorized lists at {output_dir}."
-                    )
-                return {
-                    "lists_created": 0,
-                    "repos_processed": len(repositories),
-                    "star_lists_supported": False,
-                    "local_lists_generated": True,
-                    "local_lists_created": created,
-                    "local_lists_path": str(output_dir),
-                    "message": (
-                        "GitHub list APIs require 'user' scope. Run: gh auth refresh -s user. "
-                        f"Local categorized lists generated at {output_dir}."
-                    ),
-                }
-            raise
-        existing_lists_lower = {name.lower(): list_id for name, list_id in existing_lists.items()}
-        created = 0
-        added = 0
-        for category, repos in grouped.items():
-            list_name = category
-            list_id = existing_lists_lower.get(list_name.lower())
-            if not list_id:
-                created_new = False
-                if status_callback:
-                    status_callback(f"Creating GitHub list: {list_name}")
-                self.console.print(f"[cyan]Creating list:[/cyan] {list_name}")
-                try:
-                    list_id = self.github.create_starred_list(list_name)
-                    created_new = True
-                except GitHubCLIError as exc:
-                    message = str(exc)
-                    if "Name has already been taken" in message:
-                        refreshed = self.github.get_starred_lists()
-                        refreshed_lower = {name.lower(): current_id for name, current_id in refreshed.items()}
-                        reused_id = refreshed_lower.get(list_name.lower())
-                        if reused_id:
-                            list_id = reused_id
-                            existing_lists = refreshed
-                            existing_lists_lower = refreshed_lower
-                            if status_callback:
-                                status_callback(f"Reusing existing list: {list_name}")
-                        else:
-                            if status_callback:
-                                status_callback(
-                                    f"List name conflict for '{list_name}'. Skipping this category."
-                                )
-                            continue
-                    elif ("createUserList" in message and "doesn't exist" in message) or (
-                        "createStarredRepositoryList" in message and "doesn't exist" in message
-                    ):
-                        output_dir, local_created = self._write_local_lists(grouped)
-                        if status_callback:
-                            status_callback(
-                                "GitHub list-creation API unavailable. Generated local categorized lists at "
-                                f"{output_dir}."
-                            )
-                        return {
-                            "lists_created": created,
-                            "repos_processed": len(repositories),
-                            "star_lists_supported": False,
-                            "local_lists_generated": True,
-                            "local_lists_created": local_created,
-                            "local_lists_path": str(output_dir),
-                            "message": f"GitHub list-creation API unavailable. Local categorized lists generated at {output_dir}.",
-                        }
-                    elif "INSUFFICIENT_SCOPES" in message or "requires one of the following scopes: ['user']" in message:
-                        output_dir, local_created = self._write_local_lists(grouped)
-                        if status_callback:
-                            status_callback(
-                                "GitHub list APIs need 'user' scope. Run: gh auth refresh -s user. "
-                                f"Generated local categorized lists at {output_dir}."
-                            )
-                        return {
-                            "lists_created": created,
-                            "repos_processed": len(repositories),
-                            "star_lists_supported": False,
-                            "local_lists_generated": True,
-                            "local_lists_created": local_created,
-                            "local_lists_path": str(output_dir),
-                            "message": (
-                                "GitHub list APIs require 'user' scope. Run: gh auth refresh -s user. "
-                                f"Local categorized lists generated at {output_dir}."
-                            ),
-                        }
-                    else:
-                        raise
-                if list_id:
-                    existing_lists[list_name] = list_id
-                    existing_lists_lower[list_name.lower()] = list_id
-                    if created_new:
-                        created += 1
+    def sync(self, *, refresh: bool = False, readme: bool | None = None) -> list[Repository]:
+        repos = self.github.fetch_starred_repositories()  # no local deletion if network failed
+        if not self.config.github.include_private:
+            repos = [repo for repo in repos if not repo.private]
+        get_readme = self.config.classification.use_readme if readme is None else readme
+        if get_readme:
+            old = {r.id: r for r in self.cache.list_repositories()}
             for repo in repos:
-                try:
-                    self.github.add_repository_to_list(list_id, repo.id)
-                except GitHubCLIError as exc:
-                    message = str(exc)
-                    if ("updateUserListsForItem" in message and "doesn't exist" in message) or (
-                        "addStarredRepositoryToList" in message and "doesn't exist" in message
-                    ):
-                        output_dir, local_created = self._write_local_lists(grouped)
-                        if status_callback:
-                            status_callback(
-                                "GitHub add-to-list API unavailable. Generated local categorized lists at "
-                                f"{output_dir}."
-                            )
-                        return {
-                            "lists_created": created,
-                            "repos_processed": len(repositories),
-                            "star_lists_supported": False,
-                            "local_lists_generated": True,
-                            "local_lists_created": local_created,
-                            "local_lists_path": str(output_dir),
-                            "message": f"GitHub add-to-list API unavailable. Local categorized lists generated at {output_dir}.",
-                        }
-                    if "INSUFFICIENT_SCOPES" in message or "requires one of the following scopes: ['user']" in message:
-                        output_dir, local_created = self._write_local_lists(grouped)
-                        if status_callback:
-                            status_callback(
-                                "GitHub list APIs need 'user' scope. Run: gh auth refresh -s user. "
-                                f"Generated local categorized lists at {output_dir}."
-                            )
-                        return {
-                            "lists_created": created,
-                            "repos_processed": len(repositories),
-                            "star_lists_supported": False,
-                            "local_lists_generated": True,
-                            "local_lists_created": local_created,
-                            "local_lists_path": str(output_dir),
-                            "message": (
-                                "GitHub list APIs require 'user' scope. Run: gh auth refresh -s user. "
-                                f"Local categorized lists generated at {output_dir}."
-                            ),
-                        }
-                    raise
-                added += 1
-                if status_callback and added % 25 == 0:
-                    status_callback(f"Assigning repositories to lists... {added}/{len(repositories)}")
-        return {
-            "lists_created": created,
-            "repos_processed": added,
-            "star_lists_supported": True,
-            "message": "Organization completed.",
-        }
+                previous = old.get(repo.id)
+                seen = self.cache.last_seen(repo.id)
+                fresh = seen is not None and (datetime.now(UTC) - seen).days < self.config.cache.stale_days
+                if (not refresh and self.config.cache.incremental_sync and previous and fresh
+                        and previous.updated_at == repo.updated_at and previous.readme):
+                    repo.readme = previous.readme
+                else:
+                    # GitHub CLI raw response remains local; failures do not turn into empty cached README data.
+                    endpoint = f"repos/{quote(repo.owner, safe='')}/{quote(repo.name, safe='')}/readme"
+                    try:
+                        repo.readme = self.github._run([
+                            "gh", "api", endpoint, "-H", "Accept: application/vnd.github.raw+json"], retries=1)
+                    except GitHubCLIError:
+                        repo.readme = previous.readme if previous else ""
+        self.cache.upsert_repositories(repos, complete=True)
+        return repos
 
-    def insights(self, status_callback: Callable[[str], None] | None = None) -> str:
-        repositories = self._ensure_repositories()
-        classifications = self.classify_repositories(repositories, status_callback=status_callback)
-        if status_callback:
-            status_callback("Generating markdown insights report...")
-        report_path = build_markdown_report(
-            repositories,
-            classifications,
-            self.config.insights_report_path,
-            inactive_months=self.config.inactive_months,
-        )
-        return str(report_path)
+    def repositories(self) -> list[Repository]:
+        return self.cache.list_repositories()
 
-    def search(self, query: str, top_k: int = 10) -> list[SearchResult]:
-        repositories = self._ensure_repositories()
-        repo_by_id = {repo.id: repo for repo in repositories}
-        classifications = self.cache.all_classifications(self.config.model)
-        embeddings = self.embed_repositories(repositories)
-        query_vector = self.embedding_client.embed_text(query)
+    def classify(self, *, refresh: bool = False) -> dict[str, ClassificationResult]:
+        fingerprint = self.classifier.fingerprint()
+        results = {}
+        for repo in self.repositories():
+            result = None if refresh else self.cache.get_classification(repo, fingerprint)
+            if result is None:
+                result = self.classifier.classify(repo)
+                self.cache.set_classification(repo, fingerprint, result)
+            results[repo.id] = result
+        return results
 
-        results = self.index.search(query_vector, top_k=top_k)
-        if not results:
-            return []
-        search_results: list[SearchResult] = []
-        for repo_id, score in results:
-            repo = repo_by_id.get(repo_id)
-            if not repo:
-                continue
-            search_results.append(
-                SearchResult(
-                    repository=repo,
-                    score=score,
-                    category=classifications.get(repo_id),
-                )
-            )
-        return search_results
+    def preview(self, *, limit: int | None = 100, category: str | None = None,
+                unclassified: bool = False) -> list[tuple[Repository, ClassificationResult]]:
+        results = self.classify()
+        rows = [(r, results[r.id]) for r in self.repositories() if
+                (not category or category in results[r.id].categories) and
+                (not unclassified or not results[r.id].categories)]
+        return rows[:limit] if limit is not None else rows
 
-    def close(self) -> None:
-        self.classifier.close()
-        self.embedding_client.close()
+    def search(self, text: str, *, top_k: int = 10, category: str | None = None,
+               language: str | None = None, topic: str | None = None,
+               archived: bool | None = None) -> list[SearchResult]:
+        return self.cache.search(text, top_k, category=category, language=language, topic=topic,
+                                 archived=archived, results=self.classify())
+
+    def local_lists(self) -> Path:
+        categorized: dict[str, list[Repository]] = defaultdict(list)
+        classifications = self.classify()
+        for repo in self.repositories():
+            labels = classifications[repo.id].categories or ["Unclassified - Review"]
+            for label in labels:
+                categorized[label].append(repo)
+        output = self.config.local_lists_path.expanduser()
+        output.mkdir(parents=True, exist_ok=True)
+        index = ["# Local categorized GitHub stars", "", "No remote GitHub lists were modified.", ""]
+        for category, repos in sorted(categorized.items()):
+            slug = re.sub(r"[^a-z0-9-]", "-", category.casefold()).strip("-") or "review"
+            fname = f"{slug}.md"
+            lines = [f"# {category}", "", f"Repositories: {len(repos)}", ""]
+            lines += [f"- [{r.full_name}]({r.url})" for r in sorted(repos, key=lambda r: r.full_name.casefold())]
+            (output / fname).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            index.append(f"- [{category}]({fname}) ({len(repos)})")
+        (output / "index.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+        return output
+
+    def make_plan(self) -> dict:
+        repo_list = self.repositories()
+        if not repo_list:
+            raise ValueError("No local starred repositories. Run `sync` first; refusing an empty plan.")
+        remote = self.github.remote_snapshot()
+        account = self.github.viewer_login()
+        if self.config.github.username != "auto" and account.casefold() != self.config.github.username.casefold():
+            raise GitHubCLIError("authenticated GitHub user does not match configured username")
+        plan = create_plan(repo_list, self.classify(), remote, self.classifier.fingerprint(), account)
+        # GitHub currently caps Star Lists at 32. Fail before creating any list.
+        if len(remote["lists"]) + len(plan["create_lists"]) > 32:
+            raise ValueError("planned list creation exceeds GitHub's 32-list account limit")
+        if not self.config.organization.create_missing_lists and plan["create_lists"]:
+            raise ValueError("plan requires missing list creation but config prohibits it")
+        self.cache.set_metadata("last_plan_summary", json.dumps({
+            "plan_id": plan["plan_id"], "existing_memberships": sum(len(v) for v in remote["memberships"].values()),
+            "proposed_additions": sum(len(x["add_names"]) for x in plan["changes"]),
+            "proposed_list_creations": len(plan["create_lists"]),
+        }))
+        return plan
+
+    def apply(self, plan: dict, state_path: Path) -> dict:
+        return apply_plan(plan, self.github, state_path, expected_rule_hash=self.classifier.fingerprint(),
+                          expected_repository_hash=digest([r.model_dump(mode="json") for r in sorted(self.repositories(), key=lambda r: r.full_name.casefold())]),
+                          on_applied=lambda repo_id, desired: self.cache.record_applied(plan["plan_id"], repo_id, desired))
+
+    def report(self, fmt: str = "markdown", path: Path | None = None) -> Path:
+        ext = {"markdown": ".md", "json": ".json", "csv": ".csv"}[fmt]
+        if not {"markdown": self.config.reporting.markdown,
+                "json": self.config.reporting.json_export, "csv": self.config.reporting.csv}[fmt]:
+            raise ValueError(f"{fmt} reporting disabled by configuration")
+        target = path or self.config.reporting.output_path.with_suffix(ext)
+        last_plan = self.cache.get_metadata("last_plan_summary")
+        applied = self.cache.conn.execute("SELECT count(*) FROM applied_operations").fetchone()[0]
+        audit = {"last_plan": json.loads(last_plan) if last_plan else None, "recorded_applied_assignments": applied}
+        return write_report(target, fmt, self.repositories(), self.classify(), self.config.reporting.inactive_months,
+                            audit=audit)
+
+    def close(self):
         self.cache.close()

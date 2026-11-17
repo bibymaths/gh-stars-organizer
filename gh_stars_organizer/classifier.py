@@ -1,104 +1,96 @@
+"""Explainable, multi-label rule scorer with exact phrase boundaries and no inference calls."""
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import re
+import unicodedata
+from .config import AppConfig, Category
+from .models import ClassificationResult, Evidence, Repository
+from .profiles import ALIASES
 
-import httpx
+def normalize(value: str) -> str:
+    # Preserve word boundaries, including across dots, hyphens, underscores and slashes.
+    value = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(re.findall(r"\w+", value, re.UNICODE))
 
-from gh_stars_organizer.models import Repository
-from gh_stars_organizer.utils import RateLimiter, retry
-
+def whole_phrase(text: str, phrase: str) -> bool:
+    normalized = normalize(phrase)
+    return bool(normalized and re.search(rf"(?<!\w){re.escape(normalized)}(?!\w)", text))
 
 class RepositoryClassifier:
-    def __init__(
-        self,
-        api_base_url: str,
-        model: str,
-        categories: list[str],
-        api_key_env: str = "OPENAI_API_KEY",
-        requests_per_minute: int = 60,
-        transport: httpx.BaseTransport | None = None,
-    ) -> None:
-        self.api_base_url = api_base_url.rstrip("/")
-        self.model = model
-        self.categories = categories
-        self.api_key = os.getenv(api_key_env, "")
-        self.remote_enabled = bool(self.api_key)
-        self.client = httpx.Client(timeout=30.0, transport=transport)
-        self.rate_limiter = RateLimiter(requests_per_minute)
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.categories: list[Category] = config.resolved_categories()
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
-
-    def _prompt(self, repo: Repository) -> str:
-        categories_text = "\n".join(f"- {category}" for category in self.categories)
-        return (
-            "You are a GitHub repository classifier.\n\n"
-            "Based on the repository information choose the most appropriate category from the provided list.\n\n"
-            "Return JSON only.\n\n"
-            '{\n  "category": "category_name"\n}\n\n'
-            f"Allowed categories:\n{categories_text}\n\n"
-            f"Repository name: {repo.full_name}\n"
-            f"Description: {repo.description}\n"
-            f"Topics: {', '.join(repo.topics)}\n"
-            f"Primary language: {repo.primary_language}\n"
-        )
-
-    def _extract_json(self, content: str) -> dict:
-        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-        if not match:
-            raise ValueError("No JSON object found in model output")
-        return json.loads(match.group(0))
-
-    @retry(max_attempts=3, base_delay=1.0)
-    def _request_category(self, repo: Repository) -> str:
-        self.rate_limiter.wait()
+    def fingerprint(self) -> str:
         payload = {
-            "model": self.model,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": self._prompt(repo)}],
-            "response_format": {"type": "json_object"},
+            "engine": 2, "classification": self.config.classification.model_dump(mode="json"),
+            "categories": [x.model_dump(mode="json") for x in self.categories],
+            "overrides": {k: v.model_dump(mode="json") for k, v in self.config.overrides.items()},
+            "aliases": ALIASES,
         }
-        response = self.client.post(f"{self.api_base_url}/chat/completions", headers=self._headers(), json=payload)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        parsed = self._extract_json(content)
-        category = str(parsed.get("category", "other")).strip()
-        if category not in self.categories:
-            return "other" if "other" in self.categories else self.categories[0]
-        return category
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
-    def classify(self, repo: Repository) -> str:
-        if not self.remote_enabled:
-            return self._fallback_category(repo)
-        try:
-            return self._request_category(repo)
-        except Exception:
-            return self._fallback_category(repo)
-
-    def _fallback_category(self, repo: Repository) -> str:
-        text = f"{repo.full_name} {repo.description} {' '.join(repo.topics)} {repo.primary_language}".lower()
-        rules = {
-            "genai-llm-agents": ["llm", "langchain", "agent", "openai", "gpt"],
-            "rag-search-embeddings": ["rag", "embedding", "vector", "retrieval"],
-            "backend-api-frameworks": ["api", "backend", "fastapi", "django", "flask"],
-            "frontend-ui-frameworks": ["frontend", "react", "vue", "next.js", "ui"],
-            "mobile-react-native": ["mobile", "react-native", "android", "ios"],
-            "databases-vector-search": ["database", "postgres", "mysql", "mongodb", "redis"],
-            "cloud-devops-infra": ["kubernetes", "docker", "cloud", "terraform", "devops"],
-            "developer-tools": ["cli", "tooling", "linter", "formatter", "testing"],
-            "ai-learning-resources": ["awesome", "tutorial", "course", "learn"],
-            "software-architecture": ["architecture", "design-pattern", "system-design"],
-            "product-ideas": ["saas", "boilerplate", "startup", "product"],
+    def classify(self, repo: Repository) -> ClassificationResult:
+        result = ClassificationResult(repo_id=repo.id)
+        override = next((v for k, v in self.config.overrides.items() if k.casefold() == repo.full_name.casefold()), None)
+        if override is not None:
+            result.override_used = True
+            result.excluded = override.exclude
+            result.categories = [] if override.exclude else list(dict.fromkeys(override.categories))
+            result.review_required = False
+            return result
+        settings = self.config.classification
+        heading_text = "\n".join(line.lstrip("# ") for line in repo.readme.splitlines() if line.lstrip().startswith("#"))
+        fields = {
+            "topics": " ".join(repo.topics),
+            "name": f"{repo.owner} {repo.name}",
+            "description": repo.description,
+            "readme_headings": heading_text if settings.use_readme else "",
+            "readme_body": repo.readme if settings.use_readme else "",
+            "languages": " ".join([repo.primary_language, *repo.languages]),
         }
-        for category, keywords in rules.items():
-            if category in self.categories and any(word in text for word in keywords):
-                return category
-        return "other" if "other" in self.categories else self.categories[0]
-
-    def close(self) -> None:
-        self.client.close()
+        tokens = {key: normalize(text) for key, text in fields.items()}
+        candidates: list[tuple[int, int, str]] = []
+        for category in self.categories:
+            score = 0
+            matches: list[Evidence] = []
+            # Negation cancels eligibility; negative evidence is recorded for explanation.
+            negative = [(field, word) for field in tokens for word in category.exclude_keywords
+                        if whole_phrase(tokens[field], word)]
+            if negative:
+                result.scores[category.name] = 0
+                result.matched_rules.extend(Evidence(category=category.name, term=word, field=field,
+                                                     weight=0, negative=True) for field, word in negative)
+                continue
+            seen: set[tuple[str, str]] = set()
+            for term, topic_only in [*((x, False) for x in category.keywords),
+                                     *((x, True) for x in category.topics)]:
+                variants = [term, *ALIASES.get(normalize(term), []), *category.synonyms.get(term, [])]
+                for field in tokens:
+                    if topic_only and field != "topics":
+                        continue
+                    weight = settings.weights[field]
+                    identity = (normalize(term), field)
+                    if identity in seen or not weight:
+                        continue
+                    if any(whole_phrase(tokens[field], variant) for variant in variants):
+                        seen.add(identity)
+                        score += weight
+                        matches.append(Evidence(category=category.name, term=term, field=field, weight=weight))
+            result.scores[category.name] = score
+            result.matched_rules.extend(matches)
+            minimum = category.minimum_score if category.minimum_score is not None else settings.minimum_score
+            if score >= minimum and (score > 0 or minimum > 0):
+                candidates.append((score, category.priority, category.name))
+        candidates.sort(key=lambda row: (-row[0], -row[1], row[2].casefold()))
+        if candidates:
+            high = candidates[0][0]
+            valid = [x[2] for x in candidates if high - x[0] <= settings.score_margin] if settings.score_margin else [x[2] for x in candidates]
+            max_count = settings.max_categories_per_repository if settings.allow_multiple_categories else 1
+            result.categories = valid[:max_count]
+            result.review_required = bool(settings.review_ambiguous and len(valid) > max_count)
+        else:
+            result.review_required = True
+        return result

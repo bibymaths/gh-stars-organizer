@@ -1,18 +1,52 @@
-model: gpt-4.1-mini
-embedding_model: text-embedding-3-small
-api_base_url: https://api.openai.com/v1
-api_key_env: OPENAI_API_KEY
+github:
+  username: auto
+  authentication: gh
+  page_size: 100
+  include_private: true
+classification:
+  profile: general
+  allow_multiple_categories: true
+  max_categories_per_repository: 3
+  minimum_score: 5
+  score_margin: 0
+  review_ambiguous: true
+  use_readme: false
+  weights:
+    topics: 5
+    name: 4
+    description: 3
+    readme_headings: 2
+    readme_body: 1
+    languages: 1
 categories:
-  - genai-llm-agents
-  - rag-search-embeddings
-  - backend-api-frameworks
-  - frontend-ui-frameworks
-  - mobile-react-native
-  - databases-vector-search
-  - cloud-devops-infra
-  - developer-tools
-  - ai-learning-resources
-  - software-architecture
-  - product-ideas
-  - other
-
+  - name: Scientific Computing
+    description: Numerical and computational research software
+    keywords: [numerical computing, scientific computing, numerical simulation]
+    topics: [scientific-computing, numerical-analysis]
+    exclude_keywords: [unrelated example]
+    minimum_score: 5
+    priority: 0
+overrides:
+  example-org/special-repo:
+    categories: [Scientific Computing]
+  example-org/skip-repo:
+    exclude: true
+organization:
+  preserve_existing_lists: true
+  preserve_existing_memberships: true
+  create_missing_lists: true
+  remove_obsolete_memberships: false
+  skip_unchanged: true
+  require_confirmation: true
+cache:
+  db_path: ~/.gh-stars-organizer/cache.db
+  enabled: true
+  incremental_sync: true
+  stale_days: 7
+reporting:
+  markdown: true
+  json: true
+  csv: true
+  inactive_months: 18
+  output_path: stars-insights.md
+local_lists_path: ~/.gh-stars-organizer/lists
