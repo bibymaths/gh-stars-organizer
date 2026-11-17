@@ -1,0 +1,161 @@
+
+# =============================================================================
+# Python bytecode and caches
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+.python-version.bak
+
+# =============================================================================
+# Virtual environments and local Python installations
+# =============================================================================
+.venv/
+venv/
+env/
+ENV/
+.python/
+pip-wheel-metadata/
+
+# =============================================================================
+# uv
+# =============================================================================
+# Keep uv.lock tracked for reproducible installations.
+# Keep .python-version tracked for consistent Python versions.
+.uv/
+.uv-cache/
+
+# =============================================================================
+# Build and packaging
+# =============================================================================
+build/
+dist/
+downloads/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+.installed.cfg
+MANIFEST
+
+# =============================================================================
+# Testing, coverage and static analysis
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.pyre/
+.pytype/
+.hypothesis/
+test-results/
+junit.xml
+
+# =============================================================================
+# IDEs and editors
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# =============================================================================
+# Environment variables and credentials
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# =============================================================================
+# SQLite databases and temporary files
+# =============================================================================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db-journal
+
+# =============================================================================
+# Legacy embeddings and FAISS artifacts
+# =============================================================================
+*.index
+*.index.ids.json
+*.faiss
+*.npy
+*.npz
+
+# =============================================================================
+# Generated GitHub Star List data
+# =============================================================================
+plan.json
+plan-*.json
+*.checkpoint.json
+*.snapshot.json
+*.backup.json
+gh-stars-organizer-backups/
+.gh-stars-organizer-plans/
+.gh-stars-organizer/
+backups/
+local-lists/
+
+# =============================================================================
+# Generated reports and exports
+# =============================================================================
+stars-insights.md
+stars-insights.json
+stars-insights.csv
+stars-report*.json
+stars-report*.csv
+stars-report*.md
+reports/generated/
+exports/
+
+# =============================================================================
+# Logs, runtime and temporary files
+# =============================================================================
+*.log
+logs/
+tmp/
+temp/
+.cache/
+*.tmp
+*.bak
+*.orig
+
+# =============================================================================
+# Jupyter notebooks
+# =============================================================================
+.ipynb_checkpoints/
+
+# =============================================================================
+# Operating system
+# =============================================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =============================================================================
+# Local overrides
+# =============================================================================
+config.local.yaml
+config.private.yaml
+overrides.local.yaml
