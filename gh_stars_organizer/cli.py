@@ -163,7 +163,10 @@ def organize(
                     console.print(f"List authorization unavailable; run `gh auth refresh -s user`. Local lists: {path}")
                     return
                 raise
-        console.print(f"Plan {current_plan['plan_id']}: {len(current_plan['create_lists'])} new lists; {len(current_plan['changes'])} repository changes")
+        console.print(f"Plan {current_plan['plan_id']}: {len(current_plan['create_lists'])} new lists; {len(current_plan['changes'])} repository changes; {len(current_plan.get('skipped_categories', []))} unmapped category assignments")
+        if current_plan.get('skipped_categories'):
+            console.print("[yellow]Unmapped classification categories were skipped, not silently assigned.[/yellow]")
+            console.print("Configure organization.category_to_list with exact existing Star List names to include them.")
         for change in current_plan["changes"][:20]:
             console.print(f"  {change['repository']}: add {', '.join(change['add_names'])}")
         if not apply:

@@ -98,3 +98,27 @@ def test_cache_fingerprint_stale(tmp_path, repo):
     client = FakeGitHub(state)
     with pytest.raises(StalePlanError, match="repository cache"):
         apply_plan(plan, client, tmp_path, expected_rule_hash="hash", expected_repository_hash="changed")
+
+
+def test_full_account_reuses_existing_lists_without_creation(repo):
+    state = {"lists": {f"List {i}": f"L_{i}" for i in range(32)},
+             "memberships": {repo.id: ["L_0"]}}
+    result = {repo.id: ClassificationResult(repo_id=repo.id,
+              categories=["Scientific Computing", "Numerical Methods", "Missing"])}
+    plan = create_plan([repo], result, state, "hash", "account",
+                       category_to_list={"Scientific Computing": "List 1",
+                                         "Numerical Methods": "List 1"},
+                       create_missing_lists=False)
+    assert plan["create_lists"] == []
+    assert plan["changes"][0]["add_names"] == ["List 1"]
+    assert [item["category"] for item in plan["skipped_categories"]] == ["Missing"]
+    client = FakeGitHub(state)
+    assert client.state["memberships"][repo.id] == ["L_0"]
+
+def test_no_mapping_does_not_create_33rd_list(repo):
+    state = {"lists": {f"List {i}": f"L_{i}" for i in range(32)}, "memberships": {}}
+    result = {repo.id: ClassificationResult(repo_id=repo.id, categories=["NewCategory"])}
+    plan = create_plan([repo], result, state, "hash", "account", create_missing_lists=False)
+    assert plan["changes"] == []
+    assert plan["create_lists"] == []
+    assert len(plan["skipped_categories"]) == 1

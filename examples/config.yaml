@@ -34,7 +34,10 @@ overrides:
 organization:
   preserve_existing_lists: true
   preserve_existing_memberships: true
-  create_missing_lists: true
+  create_missing_lists: false
+  # Map classification category names to EXACT existing Star List names.
+  # Replace these examples with the names in your GitHub account.
+  category_to_list: {}
   remove_obsolete_memberships: false
   skip_unchanged: true
   require_confirmation: true

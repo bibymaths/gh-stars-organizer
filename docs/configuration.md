@@ -23,3 +23,29 @@ Field weights are `topics`, `name`, `description`, `readme_headings`, `readme_bo
 ## Migration
 
 Old YAML files containing `model`, `api_key_env`, `embedding_model` and related AI options are **rejected explicitly**. Run `config --migrate --config old.yaml`. It writes `old.migrated.yaml` without overwriting the original. Legacy category names are preserved but their keywords are left empty; review them before use. Existing SQLite `repositories`, `classifications` and `embeddings` data is retained; versioned rules are stored separately in `classification_v2`.
+
+
+## Reuse existing GitHub Star Lists (32-list limit)
+
+GitHub accounts may have 32 lists already. By default `organization.create_missing_lists`
+is `false`. Categories whose names match a remote list (case-insensitively) are used
+automatically. Other categories are **skipped and reported**, not assigned arbitrarily.
+Provide explicit mappings to reuse one existing list for multiple categories:
+
+```yaml
+organization:
+  create_missing_lists: false
+  category_to_list:
+    Scientific Computing: Existing Research List
+    Numerical Methods: Existing Research List
+```
+
+The destination must be an existing GitHub list name. Replace `Existing Research List`
+with an exact list name from your account. The app never deletes/replaces memberships;
+multiple classification categories may map to one list. Unmapped categories remain
+available in local categorized lists and are reported in the dry-run plan.
+To list your remote Star List names:
+
+```bash
+gh api graphql -f query='query { viewer { lists(first: 100) { nodes { name } } } }' --jq '.data.viewer.lists.nodes[].name'
+```

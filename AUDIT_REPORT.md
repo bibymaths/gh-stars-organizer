@@ -48,9 +48,10 @@ Commands: `doctor`, `config`, `sync`, `classify`, `preview`, `organize`, `search
 ## Exact local usage
 
 ```bash
-cd gh-stars-organizer
-uv python pin 3.12
-uv sync --extra dev
+cd gh-stars-organizer-deterministic
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
 gh auth login
 gh-stars-organizer doctor
 gh-stars-organizer config --init

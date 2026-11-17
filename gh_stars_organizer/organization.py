@@ -24,19 +24,37 @@ def digest(value: Any) -> str:
 
 
 def create_plan(repos: list[Repository], results: dict[str, ClassificationResult], snapshot: dict,
-                rule_hash: str, account: str) -> dict:
+                rule_hash: str, account: str, *,
+                category_to_list: dict[str, str] | None = None,
+                create_missing_lists: bool = True) -> dict:
     """No GitHub write; current list memberships included in every intended assignment."""
     existing = snapshot["lists"]
     current = snapshot["memberships"]
     casefold = {name.casefold(): name for name in existing}
     required: set[str] = set()
     changes: list[dict] = []
+    skipped: list[dict] = []
+    mappings = {k.casefold(): v for k, v in (category_to_list or {}).items()}
+    # A category is a classification label; a Star List is a remote destination.
+    # Do not assume these vocabularies match or invent semantic equivalences.
+    def resolve_category(label: str) -> str | None:
+        destination = mappings.get(label.casefold(), label)
+        if destination.casefold() in casefold:
+            return casefold[destination.casefold()]
+        return destination if create_missing_lists else None
     for repo in sorted(repos, key=lambda r: r.full_name.casefold()):
         classification = results[repo.id]
         if classification.excluded or not classification.categories:
             continue
-        proposed = classification.categories
-        target_names = sorted((casefold.get(name.casefold(), name) for name in proposed), key=str.casefold)
+        target_names = []
+        for category in classification.categories:
+            destination = resolve_category(category)
+            if destination is None:
+                skipped.append({"repo_id": repo.id, "repository": repo.full_name,
+                                "category": category, "reason": "no existing list or explicit mapping"})
+            else:
+                target_names.append(destination)
+        target_names = sorted(set(target_names), key=str.casefold)
         required.update(target_names)
         current_ids = sorted(set(current.get(repo.id, [])))
         current_names = sorted((name for name, list_id in existing.items() if list_id in current_ids), key=str.casefold)
@@ -49,7 +67,7 @@ def create_plan(repos: list[Repository], results: dict[str, ClassificationResult
     plan = {"schema": 1, "account": account, "created_at": datetime.now(UTC).isoformat(),
             "rule_hash": rule_hash, "repository_hash": digest([r.model_dump(mode="json") for r in sorted(repos, key=lambda r: r.full_name.casefold())]),
             "snapshot": snapshot, "snapshot_hash": digest(snapshot),
-            "create_lists": creates, "changes": changes}
+            "create_lists": creates, "changes": changes, "skipped_categories": skipped}
     plan["plan_id"] = digest({k: v for k, v in plan.items() if k != "created_at"})
     return plan
 

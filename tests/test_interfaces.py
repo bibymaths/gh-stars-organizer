@@ -124,6 +124,11 @@ def test_cli_doctor_and_sync(tmp_path, repo, monkeypatch):
 
 def test_cli_apply_with_mocked_remote_state(tmp_path, repo, monkeypatch):
     path = configured(tmp_path, repo)
+    # This test explicitly opts into creating remote lists, unlike the safe default.
+    import yaml
+    config = yaml.safe_load(path.read_text())
+    config["organization"]["create_missing_lists"] = True
+    path.write_text(yaml.safe_dump(config))
     state = {"lists": {}, "memberships": {}}
     mutated = []
     monkeypatch.setattr(GitHubClient, "viewer_login", lambda _: "sample")

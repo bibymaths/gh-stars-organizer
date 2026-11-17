@@ -64,10 +64,18 @@ class Override(StrictModel):
 class OrganizationSettings(StrictModel):
     preserve_existing_lists: bool = True
     preserve_existing_memberships: bool = True
-    create_missing_lists: bool = True
+    create_missing_lists: bool = False
+    category_to_list: dict[str, str] = Field(default_factory=dict)
     remove_obsolete_memberships: bool = False  # reserved; deletion not implemented
     skip_unchanged: bool = True
     require_confirmation: bool = True
+
+    @field_validator("category_to_list")
+    @classmethod
+    def check_mappings(cls, mapping: dict[str, str]) -> dict[str, str]:
+        if any(not k.strip() or not v.strip() for k, v in mapping.items()):
+            raise ValueError("category_to_list keys and values cannot be empty")
+        return mapping
 
     @model_validator(mode="after")
     def require_additive(self):
@@ -117,6 +125,10 @@ class AppConfig(StrictModel):
                 raise ValueError(f"invalid repository override: {repo}")
             if any(x.casefold() not in names for x in override.categories):
                 raise ValueError(f"override references unknown category: {repo}")
+        names_by_case = {name.casefold() for name in names}
+        unknown = sorted(key for key in self.organization.category_to_list if key.casefold() not in names_by_case)
+        if unknown:
+            raise ValueError(f"category_to_list references unknown classification categories: {unknown}")
         return self
 
     def resolved_categories(self) -> list[Category]:

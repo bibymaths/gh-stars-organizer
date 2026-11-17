@@ -22,8 +22,9 @@ Local-first, multi-label organization of GitHub starred repositories. **No OpenA
 Python 3.11+, GitHub CLI, and an ordinary terminal. To install this downloadable replacement project:
 
 ```bash
-uv python pin 3.12
-uv sync --extra dev
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
 gh auth login
 gh auth status
 gh-stars-organizer --help
@@ -76,3 +77,13 @@ Tests are entirely offline and mocked. The release source carries no provider AP
 A local YAML category schema is not a language model: rule coverage varies and must be tuned to the user's collection. README retrieval is opt-in. Unavailable README content preserves any older cached copy; it does not cause remote writes. GitHub Star List requests may require a `user` scope, and actual provider behavior can change. Full remote snapshot reads before each write prioritize safety over speed. No automated rollback, deletion of obsolete memberships, or unstar features are included. The old FAISS and model tables remain in existing SQLite databases for non-destructive migration; they are not consulted.
 
 License: MIT; upstream license attribution retained in `LICENSE`.
+
+
+### Accounts with 32 existing Star Lists
+
+New list creation is disabled by default. The organizer will reuse lists whose names
+match classification categories, and skip unmatched categories with a clear count.
+To organize all classified repositories, map **every relevant category** to an actual
+existing Star List under `organization.category_to_list` in your YAML configuration.
+Several categories may share one list. Preview with `organize --dry-run --output plan.json`;
+review `skipped_categories` in the plan before applying.
